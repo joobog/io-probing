@@ -831,62 +831,80 @@ void* run_benchmark_phase(void* thrd_args) {
     // benchmark phase
     thrd_args_t *args = (thrd_args_t*) thrd_args;
 
-    for(global_iteration = 0; global_iteration < o.iterations; global_iteration++){
-      if(o.adaptive_waiting_mode){
-        o.relative_waiting_factor = 0;
-      }
-      init_stats(args->phase_stats, o.num * o.dset_count);
-      MPI_Barrier(MPI_COMM_WORLD);
-      start_timer(& (args->phase_stats->phase_start_timer));
-      run_benchmark(args->phase_stats, args->current_index);
-      end_phase("benchmark", args->phase_stats);
-
-      if(o.adaptive_waiting_mode){
-        o.relative_waiting_factor = 0.0625;
-        for(int r=0; r <= 6; r++){
-          init_stats(args->phase_stats, o.num * o.dset_count);
-          MPI_Barrier(MPI_COMM_WORLD);
-          start_timer(& (args->phase_stats->phase_start_timer));
-          run_benchmark(args->phase_stats, args->current_index);
-          end_phase("benchmark", args->phase_stats);
-          o.relative_waiting_factor *= 2;
+    //for(global_iteration = 0; global_iteration < o.iterations; global_iteration++){
+    //
+    global_iteration = 0;
+    while (o.iterations == -1 || global_iteration < o.iterations) {
+        if (o.iterations != -1) {
+            global_iteration++;
         }
+        if(o.adaptive_waiting_mode){
+            o.relative_waiting_factor = 0;
+        }
+        init_stats(args->phase_stats, o.num * o.dset_count);
+        MPI_Barrier(MPI_COMM_WORLD);
+        start_timer(& (args->phase_stats->phase_start_timer));
+        run_benchmark(args->phase_stats, args->current_index);
+        end_phase("benchmark", args->phase_stats);
+
+        if(o.adaptive_waiting_mode){
+            o.relative_waiting_factor = 0.0625;
+            for(int r=0; r <= 6; r++){
+                init_stats(args->phase_stats, o.num * o.dset_count);
+                MPI_Barrier(MPI_COMM_WORLD);
+                start_timer(& (args->phase_stats->phase_start_timer));
+                run_benchmark(args->phase_stats, args->current_index);
+                end_phase("benchmark", args->phase_stats);
+                o.relative_waiting_factor *= 2;
+            }
+        }
+
+      /* 
+       * random access in a large file
+       * 1. file_size = access_size * count
+       * 2. rand_offset = access_size * (rand() mod count)
+       *
+       * Since rand_offset is a multiple of some random value, 
+       * the offset points to a random chunk, 
+       * rather than to a random position in a file.
+       * */
+      
+      {
+        // init
+        int fd = open(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
+        if (fd < 0) { 
+            perror("r1"); 
+            exit(1); 
+        } 
+        void *rabuf = malloc(o.ra_access_size * o.ra_count); // contains bullshit, but's ok for this purpose
+        timer ra_timer;
+        off_t rand_offset;
+        
+        // capture write time
+        rand_offset = (rand() % o.ra_count) * o.ra_access_size;
+        start_timer(&ra_timer);
+        lseek(fd, rand_offset, SEEK_SET);
+        write(fd, rabuf, o.ra_access_size); 
+        double rand_write_t = stop_timer(ra_timer);
+        printf("write %.10f\n", rand_write_t);
+
+        // capture read time
+        rand_offset = (rand() % o.ra_count) * o.ra_access_size;
+        start_timer(&ra_timer);
+        lseek(fd, rand_offset, SEEK_SET);
+        read(fd, rabuf, o.ra_access_size);
+        double rand_read_t = stop_timer(ra_timer);
+        printf("read %.10f\n", rand_read_t);
+
+        // cleanup
+        free(rabuf);
+        close(fd); 
+
       }
+      sleep(1);
     }
 
-
-
-    // init
-    int fd = open(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
-    if (fd < 0) { 
-        perror("r1"); 
-        exit(1); 
-    } 
-    void *rabuf = malloc(o.ra_access_size * o.ra_count); // contains bullshit, but's ok for this purpose
-    timer ra_timer;
-    off_t rand_offset;
-    
-    // capture write time
-    rand_offset = (rand() % o.ra_count) * o.ra_access_size;
-    start_timer(&ra_timer);
-    lseek(fd, rand_offset, SEEK_SET);
-    write(fd, rabuf, o.ra_access_size); 
-    double rand_write_t = stop_timer(ra_timer);
-    printf("write %.10f\n", rand_write_t);
-
-    // capture read time
-    rand_offset = (rand() % o.ra_count) * o.ra_access_size;
-    start_timer(&ra_timer);
-    lseek(fd, rand_offset, SEEK_SET);
-    read(fd, rabuf, o.ra_access_size);
-    double rand_read_t = stop_timer(ra_timer);
-    printf("read %.10f\n", rand_read_t);
-
-    // cleanup
-    free(rabuf);
-    close(fd); 
-
-    pthread_exit(NULL);
+//    pthread_exit(NULL);
     return NULL;
 }
 
@@ -1165,16 +1183,23 @@ int main(int argc, char ** argv){
 
   // here
   if (o.phase_benchmark){
-      for (int i = 0; i < 10; ++i) {
-          thrd_args_t args = {
-              .current_index = &current_index,
-              .phase_stats = &phase_stats
-          };
+//      while (true) {
+//          thrd_args_t args = {
+//              .current_index = &current_index,
+//              .phase_stats = &phase_stats
+//          };
+//
+//          pthread_t thrd;
+//          pthread_create(&thrd, NULL, run_benchmark_phase, &args);
+//          sleep(1);
+//      }
 
-          pthread_t thrd;
-          pthread_create(&thrd, NULL, run_benchmark_phase, &args);
-          sleep(1);
-      }
+      thrd_args_t args = {
+          .current_index = &current_index,
+          .phase_stats = &phase_stats
+      };
+
+      run_benchmark_phase(&args);
   }
 
   // cleanup phase
