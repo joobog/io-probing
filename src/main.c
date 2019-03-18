@@ -571,8 +571,8 @@ void run_precreate(phase_stat_t * s, int current_index){
 
   if (o.ra_enabled) {
       if (access(o.ra_file, F_OK) != -1) {
-          // make sure, random access file exists and is large enough
-          int fd = open(o.ra_file, O_RDONLY, 0644); 
+          // file exists: make sure, random access file exists and is large enough
+          int fd = open64(o.ra_file, O_RDONLY, 0644); 
           if (fd < 0) { 
               printf("Error: Couldn't open %s\n", o.ra_file); 
               exit(1); 
@@ -581,6 +581,9 @@ void run_precreate(phase_stat_t * s, int current_index){
           if (! o.ra_count >= fsize / o.ra_size) {
               printf("Error: %s is not large enough. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
               exit(1);
+          }
+          else {
+              printf("Warning: %s exists. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
           }
           close(fd);
       } else {
@@ -902,7 +905,7 @@ void* run_benchmark_phase(void* thrd_args) {
     if (o.ra_enabled) {
         // sanity check:
         // make sure, random access file exists and is large enough
-        int fd = open(o.ra_file, O_RDONLY, 0644); 
+        int fd = open64(o.ra_file, O_RDONLY, 0644); 
         if (fd < 0) { 
             printf("Couldn't open %s\n", o.ra_file); 
             exit(1); 
