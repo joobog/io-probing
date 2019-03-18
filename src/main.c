@@ -18,9 +18,10 @@
 #include <mpi.h>
 
 
-#include <pthread.h>
+//#include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <errno.h>
@@ -111,6 +112,11 @@ typedef struct{ // NOTE: if this type is changed, adjust end_phase() !!!
   double max_op_time;
   timer phase_start_timer;
   int stonewall_iterations;
+  double ra_write;
+  double ra_read;
+  double ra_write_sum;
+  double ra_read_sum;
+  struct timeval timestamp;
 } phase_stat_t;
 
 #define CHECK_MPI_RET(ret) if (ret != MPI_SUCCESS){ printf("Unexpected error in MPI on Line %d\n", __LINE__);}
@@ -160,9 +166,10 @@ struct benchmark_options{
   uint64_t start_item_number;
 
   // Random access probing options
+  int ra_enabled;
   char * ra_file;
   size_t ra_count;
-  size_t ra_access_size;
+  size_t ra_size;
 };
 
 static int global_iteration = 0;
@@ -180,8 +187,8 @@ void init_options(){
   o.file_size = 3901;
   o.run_info_file = "mdtest.status";
   o.ra_count = 1000;
-  o.ra_access_size = 1024 * 1024; // Access 1 MB block
-  o.ra_file = "rand_testfile";
+  o.ra_size = 1024 * 1024; // Access 1 MB block
+  o.ra_file = "rndtest.bin";
 }
 
 static void wait(double runtime){
@@ -285,8 +292,9 @@ static void print_p_stat(char * buff, const char * name, phase_stat_t * p, doubl
     }
   }else{
     int pos = 0;
+    pos += sprintf(buff, "timestamp %lld\n", (long long) p->timestamp.tv_sec);
     // single line
-    pos += sprintf(buff, "%s process max:%.2fs ", name, t);
+    pos += sprintf(buff + pos, "%s process max:%.2fs ", name, t);
     if(print_global){
       pos += sprintf(buff + pos, "min:%.1fs mean: %.1fs balance:%.1f stddev:%.1f ", r_min, r_mean, r_min/r_max * 100.0, r_std);
     }
@@ -360,7 +368,14 @@ static void print_p_stat(char * buff, const char * name, phase_stat_t * p, doubl
       time_statistics_t stat = p->stats_delete;
       pos += sprintf(buff + pos, " delete(%.4es, %.4es, %.4es, %.4es, %.4es, %.4es, %.4es)", stat.min, stat.q1, stat.median, stat.q3, stat.q90, stat.q99, stat.max);
     }
+
+    if (o.ra_enabled && o.phase_benchmark) {
+        pos += sprintf(buff + pos, "\n");
+        pos += sprintf(buff + pos, "write %.10f\n", p->ra_write_sum);
+        pos += sprintf(buff + pos, "read %.10f\n", p->ra_read_sum);
+    }
   }
+
 }
 
 static int compare_floats(time_result_t * x, time_result_t * y){
@@ -445,7 +460,13 @@ static void end_phase(const char * name, phase_stat_t * p){
   CHECK_MPI_RET(ret)
   if(o.rank == 0) {
     g_stat.t_all = (double*) malloc(sizeof(double) * o.size);
+    g_stat.timestamp = p->timestamp;
   }
+
+  ret = MPI_Reduce(& p->ra_write, & g_stat.ra_write_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  CHECK_MPI_RET(ret)
+  ret = MPI_Reduce(& p->ra_read, & g_stat.ra_read_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  CHECK_MPI_RET(ret)
   ret = MPI_Gather(& p->t, 1, MPI_DOUBLE, g_stat.t_all, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
   CHECK_MPI_RET(ret)
   ret = MPI_Reduce(& p->dset_name, & g_stat.dset_name, 2*(3+5), MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -548,18 +569,39 @@ void run_precreate(phase_stat_t * s, int current_index){
   char obj_name[4096];
   int ret;
 
-  int fd = open(o.ra_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
-  if (fd < 0) { 
-     perror("r1"); 
-     exit(1); 
-  } 
-
-  void *rabuf = malloc(o.ra_access_size * o.ra_count); // contains bullshit, but's ok for this purpose
-  for (size_t i = 0; i < o.ra_count; ++i) {
-      write(fd, rabuf, o.ra_access_size); 
+  if (o.ra_enabled) {
+      if (access(o.ra_file, F_OK) != -1) {
+          // make sure, random access file exists and is large enough
+          int fd = open(o.ra_file, O_RDONLY, 0644); 
+          if (fd < 0) { 
+              printf("Error: Couldn't open %s\n", o.ra_file); 
+              exit(1); 
+          } 
+          off64_t fsize = lseek64(fd, 0L, SEEK_END);
+          if (! o.ra_count >= fsize / o.ra_size) {
+              printf("Error: %s is not large enough. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
+              exit(1);
+          }
+          close(fd);
+      } else {
+          int fd = open64(o.ra_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
+          if (fd < 0) { 
+              printf("Error: Couldn't create %s\n", o.ra_file); 
+              exit(1); 
+          } 
+          void *rabuf = malloc(o.ra_size); // contains bullshit, but's ok for this purpose
+          if (NULL == rabuf) {
+              perror("Error: Couldn't create ra buffer"); 
+              exit(1); 
+          }
+          printf("Creating %s. This can take a while.\n", o.ra_file);
+          for (size_t i = 0; i < o.ra_count; ++i) {
+              pwrite64(fd, rabuf, o.ra_size, i*o.ra_size); 
+          }
+          free(rabuf);
+          close(fd); 
+      }
   }
-  free(rabuf);
-  close(fd); 
 
   for(int i=0; i < o.dset_count; i++){
     ret = o.plugin->def_dset_name(dset, o.rank, i);
@@ -827,14 +869,59 @@ typedef struct thrd_args_t {
 } thrd_args_t;
 
 
+
+static void run_rnd_benchmark(phase_stat_t *p) {
+    int fd = open64(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
+    void *rabuf = malloc(o.ra_size * o.ra_count); // contains bullshit, but's ok for this purpose
+    timer ra_timer;
+    off64_t rnd_offset;
+
+    // capture write time
+    rnd_offset = (rand() % o.ra_count) * o.ra_size;
+    start_timer(&ra_timer);
+    pwrite64(fd, rabuf, o.ra_size, rnd_offset); 
+    p->ra_write = stop_timer(ra_timer);
+
+    // capture read time
+    rnd_offset = (rand() % o.ra_count) * o.ra_size;
+    start_timer(&ra_timer);
+    pread64(fd, rabuf, o.ra_size, rnd_offset);
+    p->ra_read = stop_timer(ra_timer);
+
+    // cleanup
+    free(rabuf);
+    close(fd); 
+}
+
+
+
 void* run_benchmark_phase(void* thrd_args) {
     // benchmark phase
     thrd_args_t *args = (thrd_args_t*) thrd_args;
+
+    if (o.ra_enabled) {
+        // sanity check:
+        // make sure, random access file exists and is large enough
+        int fd = open(o.ra_file, O_RDONLY, 0644); 
+        if (fd < 0) { 
+            printf("Couldn't open %s\n", o.ra_file); 
+            exit(1); 
+        } 
+        off64_t fsize = lseek64(fd, 0L, SEEK_END);
+        if (! o.ra_count >= fsize / o.ra_size) {
+            printf("Error: %s is not large enough. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
+            exit(1);
+        }
+        close(fd);
+    }
+
 
     //for(global_iteration = 0; global_iteration < o.iterations; global_iteration++){
     //
     global_iteration = 0;
     while (o.iterations == -1 || global_iteration < o.iterations) {
+
+
         if (o.iterations != -1) {
             global_iteration++;
         }
@@ -843,8 +930,12 @@ void* run_benchmark_phase(void* thrd_args) {
         }
         init_stats(args->phase_stats, o.num * o.dset_count);
         MPI_Barrier(MPI_COMM_WORLD);
+        gettimeofday(&(args->phase_stats->timestamp), NULL);
         start_timer(& (args->phase_stats->phase_start_timer));
         run_benchmark(args->phase_stats, args->current_index);
+        if (o.ra_enabled) {
+            run_rnd_benchmark(args->phase_stats);
+        }
         end_phase("benchmark", args->phase_stats);
 
         if(o.adaptive_waiting_mode){
@@ -854,57 +945,18 @@ void* run_benchmark_phase(void* thrd_args) {
                 MPI_Barrier(MPI_COMM_WORLD);
                 start_timer(& (args->phase_stats->phase_start_timer));
                 run_benchmark(args->phase_stats, args->current_index);
+                if (o.ra_enabled) {
+                    run_rnd_benchmark(args->phase_stats);
+                }
                 end_phase("benchmark", args->phase_stats);
                 o.relative_waiting_factor *= 2;
             }
         }
 
-      /* 
-       * random access in a large file
-       * 1. file_size = access_size * count
-       * 2. rand_offset = access_size * (rand() mod count)
-       *
-       * Since rand_offset is a multiple of some random value, 
-       * the offset points to a random chunk, 
-       * rather than to a random position in a file.
-       * */
-      
-      {
-        // init
-        int fd = open(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
-        if (fd < 0) { 
-            perror("r1"); 
-            exit(1); 
-        } 
-        void *rabuf = malloc(o.ra_access_size * o.ra_count); // contains bullshit, but's ok for this purpose
-        timer ra_timer;
-        off_t rand_offset;
-        
-        // capture write time
-        rand_offset = (rand() % o.ra_count) * o.ra_access_size;
-        start_timer(&ra_timer);
-        lseek(fd, rand_offset, SEEK_SET);
-        write(fd, rabuf, o.ra_access_size); 
-        double rand_write_t = stop_timer(ra_timer);
-        printf("write %.10f\n", rand_write_t);
-
-        // capture read time
-        rand_offset = (rand() % o.ra_count) * o.ra_access_size;
-        start_timer(&ra_timer);
-        lseek(fd, rand_offset, SEEK_SET);
-        read(fd, rabuf, o.ra_access_size);
-        double rand_read_t = stop_timer(ra_timer);
-        printf("read %.10f\n", rand_read_t);
-
-        // cleanup
-        free(rabuf);
-        close(fd); 
-
-      }
-      sleep(1);
+        sleep(1);
     }
 
-//    pthread_exit(NULL);
+    //    pthread_exit(NULL);
     return NULL;
 }
 
@@ -953,8 +1005,10 @@ void run_cleanup(phase_stat_t * s, int start_index){
       s->dset_delete.err++;
     }
   }
+  if (o.ra_enabled) {
+    unlink(o.ra_file);
+  }
 }
-
 
 static option_help options [] = {
   {'O', "offset", "Offset in o.ranks between writers and readers. Writers and readers should be located on different nodes.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.offset},
@@ -967,6 +1021,10 @@ static option_help options [] = {
   {'q', "quiet", "Avoid irrelevant printing.", OPTION_FLAG, 'd', & o.quiet_output},
   {'m', "lim-free-mem", "Allocate memory until this limit (in MiB) is reached.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.limit_memory},
   {'M', "lim-free-mem-phase", "Allocate memory until this limit (in MiB) is reached between the phases, but free it before starting the next phase; the time is NOT included for the phase.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.limit_memory_between_phases},
+  {0, "ra-enable", "Enable random access benchmark", OPTION_FLAG, 'd', & o.ra_enabled},
+  {0, "ra-count", "random access counter.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_count},
+  {0, "ra-size", "random access size in BYTES.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_size},
+  {0, "ra-file", "random access file name. (file size = ra-count * ra-size)", OPTION_OPTIONAL_ARGUMENT, 's', & o.ra_file},
   {'S', "object-size", "Size for the created objects.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.file_size},
   {'R', "iterations", "Number of times to rerun the main phase", OPTION_OPTIONAL_ARGUMENT, 'd', & o.iterations},
   {'t', "waiting-time", "Waiting time relative to runtime (1.0 is 100%%)", OPTION_OPTIONAL_ARGUMENT, 'f', & o.relative_waiting_factor},
