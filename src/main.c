@@ -114,6 +114,10 @@ typedef struct{ // NOTE: if this type is changed, adjust end_phase() !!!
   int stonewall_iterations;
   double ra_write;
   double ra_read;
+  off64_t ra_write_offset;
+  off64_t ra_read_offset;
+  off64_t* ra_write_offsets;
+  off64_t* ra_read_offsets;
   double ra_write_sum;
   double ra_read_sum;
   struct timeval timestamp;
@@ -294,7 +298,8 @@ static void print_p_stat(char * buff, const char * name, phase_stat_t * p, doubl
     }
   }else{
     int pos = 0;
-    pos += sprintf(buff, "timestamp %lld\n", (long long) p->timestamp.tv_sec);
+    pos += sprintf(buff, "start\n");
+    pos += sprintf(buff + pos, "timestamp %lld\n", (long long) p->timestamp.tv_sec);
     // single line
     pos += sprintf(buff + pos, "%s process max:%.2fs ", name, t);
     if(print_global){
@@ -373,9 +378,18 @@ static void print_p_stat(char * buff, const char * name, phase_stat_t * p, doubl
 
     if (o.ra_enabled && o.phase_benchmark) {
         pos += sprintf(buff + pos, "\n");
-        pos += sprintf(buff + pos, "write %.10f\n", p->ra_write_sum);
-        pos += sprintf(buff + pos, "read %.10f\n", p->ra_read_sum);
+        pos += sprintf(buff + pos, "write %.9f rnd_offsets( ", p->ra_write_sum);
+        for (int i = 0; i < o.size; ++i) {
+            pos += sprintf(buff + pos, "%zd ", p->ra_write_offsets[i]);
+        }
+        pos += sprintf(buff + pos, ")\n");
+        pos += sprintf(buff + pos, "read %.9f rnd_offsets( ", p->ra_read_sum);
+        for (int i = 0; i < o.size; ++i) {
+            pos += sprintf(buff + pos, "%zd ", p->ra_read_offsets[i]);
+        }
+        pos += sprintf(buff + pos, ")\n");
     }
+    pos += sprintf(buff + pos, "end\n");
   }
 
 }
@@ -462,6 +476,8 @@ static void end_phase(const char * name, phase_stat_t * p){
   CHECK_MPI_RET(ret)
   if(o.rank == 0) {
     g_stat.t_all = (double*) malloc(sizeof(double) * o.size);
+    g_stat.ra_write_offsets = malloc(sizeof(&g_stat.ra_write_offsets) * o.size);
+    g_stat.ra_read_offsets = malloc(sizeof(&g_stat.ra_read_offsets) * o.size);
     g_stat.timestamp = p->timestamp;
   }
 
@@ -470,6 +486,10 @@ static void end_phase(const char * name, phase_stat_t * p){
   ret = MPI_Reduce(& p->ra_read, & g_stat.ra_read_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
   CHECK_MPI_RET(ret)
   ret = MPI_Gather(& p->t, 1, MPI_DOUBLE, g_stat.t_all, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  CHECK_MPI_RET(ret)
+  ret = MPI_Gather(& p->ra_write_offset, 1, MPI_LONG_LONG, g_stat.ra_write_offsets, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+  CHECK_MPI_RET(ret)
+  ret = MPI_Gather(& p->ra_read_offset, 1, MPI_LONG_LONG, g_stat.ra_read_offsets, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
   CHECK_MPI_RET(ret)
   ret = MPI_Reduce(& p->dset_name, & g_stat.dset_name, 2*(3+5), MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
   CHECK_MPI_RET(ret)
@@ -544,6 +564,8 @@ static void end_phase(const char * name, phase_stat_t * p){
 
   if(g_stat.t_all){
     free(g_stat.t_all);
+    free(g_stat.ra_write_offsets);
+    free(g_stat.ra_read_offsets);
   }
   if(p->time_create){
     free(p->time_create);
@@ -879,18 +901,17 @@ static void run_rnd_benchmark(phase_stat_t *p) {
     int fd = open64(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
     void *rabuf = malloc(o.ra_size); // contains bullshit, but's ok for this purpose
     timer ra_timer;
-    off64_t rnd_offset;
 
     // capture write time
-    rnd_offset = (rand() % o.ra_count) * o.ra_size;
+    p->ra_write_offset = (rand() % o.ra_count) * o.ra_size;
     start_timer(&ra_timer);
-    pwrite64(fd, rabuf, o.ra_size, rnd_offset); 
+    pwrite64(fd, rabuf, o.ra_size, p->ra_write_offset); 
     p->ra_write = stop_timer(ra_timer);
 
     // capture read time
-    rnd_offset = (rand() % o.ra_count) * o.ra_size;
+    p->ra_read_offset = (rand() % o.ra_count) * o.ra_size;
     start_timer(&ra_timer);
-    pread64(fd, rabuf, o.ra_size, rnd_offset);
+    pread64(fd, rabuf, o.ra_size, p->ra_read_offset);
     p->ra_read = stop_timer(ra_timer);
 
     // cleanup
