@@ -16,7 +16,7 @@ trap finish EXIT
 VAL=0
 for FS in "${!DIRS[@]}"; do
 	FILE=output-$HOSTNAME-$FS-$(date -I).txt
-    mpiexec -n 1 $IO_PROBING -i posix -P $WORKING_SET -D 1 -I 0 -R -1 -2  --run-info-file=mdtest.stat$VAL --ra-enable --ra-file "${DIRS[$FS]}/test.bin" --ra-count $COUNT -- -D "${DIRS[$FS]}/md" &>> $FILE &
+    mpiexec -n 1 $IO_PROBING -i posix -P $WORKING_SET -D 1 -I 1 -R -1 -2  --run-info-file=mdtest.stat$VAL --ra-enable --ra-file "${DIRS[$FS]}/test.bin" --ra-count $COUNT -- -D "${DIRS[$FS]}/md" &>> $FILE &
 	PID=$!
     echo -e "Running benchmark on ${DIRS[$FS]}"
 	printf "%10s: %d\n" "PID" $PID

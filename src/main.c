@@ -170,6 +170,7 @@ struct benchmark_options{
   char * ra_file;
   size_t ra_count;
   size_t ra_size;
+  int probing_interval;
 };
 
 static int global_iteration = 0;
@@ -189,6 +190,7 @@ void init_options(){
   o.ra_count = 1000;
   o.ra_size = 1024 * 1024; // Access 1 MB block
   o.ra_file = "rndtest.bin";
+  o.probing_interval = 1;
 }
 
 static void wait(double runtime){
@@ -583,7 +585,7 @@ void run_precreate(phase_stat_t * s, int current_index){
               exit(1);
           }
           else {
-              printf("Warning: %s exists. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
+              printf("Skip creating %s. Found %zd bytes, require at least %zu bytes", o.ra_file, fsize, o.ra_count * o.ra_size);
           }
           close(fd);
       } else {
@@ -875,7 +877,7 @@ typedef struct thrd_args_t {
 
 static void run_rnd_benchmark(phase_stat_t *p) {
     int fd = open64(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
-    void *rabuf = malloc(o.ra_size * o.ra_count); // contains bullshit, but's ok for this purpose
+    void *rabuf = malloc(o.ra_size); // contains bullshit, but's ok for this purpose
     timer ra_timer;
     off64_t rnd_offset;
 
@@ -956,7 +958,7 @@ void* run_benchmark_phase(void* thrd_args) {
             }
         }
 
-        sleep(1);
+        sleep(o.probing_interval);
     }
 
     //    pthread_exit(NULL);
@@ -1025,11 +1027,12 @@ static option_help options [] = {
   {'m', "lim-free-mem", "Allocate memory until this limit (in MiB) is reached.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.limit_memory},
   {'M', "lim-free-mem-phase", "Allocate memory until this limit (in MiB) is reached between the phases, but free it before starting the next phase; the time is NOT included for the phase.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.limit_memory_between_phases},
   {0, "ra-enable", "Enable random access benchmark", OPTION_FLAG, 'd', & o.ra_enabled},
-  {0, "ra-count", "random access counter.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_count},
-  {0, "ra-size", "random access size in BYTES.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_size},
-  {0, "ra-file", "random access file name. (file size = ra-count * ra-size)", OPTION_OPTIONAL_ARGUMENT, 's', & o.ra_file},
+  {0, "ra-count", "Random access counter.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_count},
+  {0, "ra-size", "Random access size in BYTES.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.ra_size},
+  {0, "ra-file", "Random access file name. (file size = ra-count * ra-size)", OPTION_OPTIONAL_ARGUMENT, 's', & o.ra_file},
+  {0, "interval", "Probing interval", OPTION_OPTIONAL_ARGUMENT, 'd', & o.probing_interval},
   {'S', "object-size", "Size for the created objects.", OPTION_OPTIONAL_ARGUMENT, 'd', & o.file_size},
-  {'R', "iterations", "Number of times to rerun the main phase", OPTION_OPTIONAL_ARGUMENT, 'd', & o.iterations},
+  {'R', "iterations", "Number of times to rerun the main phase (-1 for infinite)", OPTION_OPTIONAL_ARGUMENT, 'd', & o.iterations},
   {'t', "waiting-time", "Waiting time relative to runtime (1.0 is 100%%)", OPTION_OPTIONAL_ARGUMENT, 'f', & o.relative_waiting_factor},
   {'T', "adaptive-waiting", "Compute an adaptive waiting time", OPTION_FLAG, 'd', & o.adaptive_waiting_mode},
   {'1', "run-precreate", "Run precreate phase", OPTION_FLAG, 'd', & o.phase_precreate},
