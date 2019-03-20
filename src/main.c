@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include <md_util.h>
 #include <md_option.h>
@@ -58,6 +59,8 @@ NULL
 #define VERSION "UNKNOWN"
 #endif
 #endif
+
+static void store_position(int position);
 
 // successfull, errors
 typedef struct {
@@ -898,25 +901,36 @@ typedef struct thrd_args_t {
 
 
 static void run_rnd_benchmark(phase_stat_t *p) {
-    int fd = open64(o.ra_file, O_WRONLY | O_RDONLY, 0644); 
-    void *rabuf = malloc(o.ra_size); // contains bullshit, but's ok for this purpose
     timer ra_timer;
+    void *rabuf = malloc(o.ra_size); // this random access buffer contains bullshit, but's ok for this purpose
 
-    // capture write time
+    int fd = open64(o.ra_file, O_RDWR, S_IWUSR | S_IRUSR ); 
+    if (0 > fd) {
+        printf("Error opening file %s for write: %s\n", o.ra_file, strerror(errno));
+        exit(1);
+    }
+
     p->ra_write_offset = (rand() % o.ra_count) * o.ra_size;
     start_timer(&ra_timer);
-    pwrite64(fd, rabuf, o.ra_size, p->ra_write_offset); 
+    ssize_t bytes_written = pwrite64(fd, rabuf, o.ra_size, p->ra_write_offset); 
     p->ra_write = stop_timer(ra_timer);
+    if ((ssize_t) o.ra_size != bytes_written) {
+        printf("Error: writting to %s failed. %s\n", o.ra_file, strerror(errno));
+        exit(1);
+    }
 
-    // capture read time
     p->ra_read_offset = (rand() % o.ra_count) * o.ra_size;
     start_timer(&ra_timer);
-    pread64(fd, rabuf, o.ra_size, p->ra_read_offset);
+    ssize_t bytes_read = pread64(fd, rabuf, o.ra_size, p->ra_read_offset);
     p->ra_read = stop_timer(ra_timer);
+    if ((ssize_t) o.ra_size != bytes_read) {
+        printf("Error: reading from %s failed. %s\n", o.ra_file, strerror(errno));
+        exit(1);
+    }
 
     // cleanup
-    free(rabuf);
     close(fd); 
+    free(rabuf);
 }
 
 
@@ -979,6 +993,7 @@ void* run_benchmark_phase(void* thrd_args) {
             }
         }
 
+        store_position(*args->current_index);
         sleep(o.probing_interval);
     }
 
